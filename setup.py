@@ -14,14 +14,21 @@ class FileFetch(install):
     def run(self):
         install.run(self)
 
-        # Install the dependency from the Git repository
+        # Install the dependency from the Git repository.
+        # --no-build-isolation: GroundingDINO's own setup.py imports torch at
+        # build time; pip's default isolated build env can't see the torch
+        # we already installed, so the build fails with "No module named
+        # torch" unless isolation is disabled here (same fix as detectron2
+        # below). check=True: surface a real build failure instead of
+        # silently continuing (this used to swallow the error and report
+        # success even though groundingdino never got installed).
         subprocess.run([
-            "pip", "install", "-U",
+            "pip", "install", "-U", "--no-build-isolation",
             #'git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33',
             'git+https://github.com/IDEA-Research/GroundingDINO.git@2b62f419c292ca9c518daae55512fabc3fead4a4',
             # 'git+https://github.com/facebookresearch/segment-anything.git@6fdee8f2727f4506cfbbe553e23b895e27956588'
             'git+https://github.com/ChaoningZhang/MobileSAM@c12dd83cbe26dffdcc6a0f9e7be2f6fb024df0ed'
-        ])
+        ], check=True)
 
         # subprocess.run([
         #     "conda", "install", "-y", "pytorch", "torchvision", "torchaudio", "pytorch-cuda=11.7", "-c", "pytorch", "-c", "nvidia"

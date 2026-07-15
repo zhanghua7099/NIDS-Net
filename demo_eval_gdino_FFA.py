@@ -119,7 +119,7 @@ os.makedirs(args.output_dir, exist_ok=True)
 
 
 # use dino v2 to extract features
-encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
+encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg', skip_validation=True)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 encoder.to(device)
 encoder.eval()

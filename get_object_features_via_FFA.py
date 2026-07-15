@@ -41,7 +41,7 @@ img_size = 448
 object_dataset = InstanceDataset(data_dir='./database/Objects', dataset='Object',transform=None, imsize=img_size)
 
 # use dino v2 to extract features
-encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg') #
+encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg', skip_validation=True) #
 encoder.to('cuda')
 encoder.eval()
 

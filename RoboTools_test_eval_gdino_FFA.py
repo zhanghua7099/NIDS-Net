@@ -105,7 +105,7 @@ print("test_path: ", args.test_path)
 os.makedirs(args.output_dir, exist_ok=True)
 
 # model, autocast_dtype = setup_and_build_model(args)
-encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
+encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg', skip_validation=True)
 encoder.to('cuda')
 encoder.eval()
 

@@ -109,7 +109,7 @@ args = args_parser.parse_args(args=[
                                     ])
 os.makedirs(args.output_dir, exist_ok=True)
 
-encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
+encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg', skip_validation=True)
 encoder.to('cuda')
 encoder.eval()
 

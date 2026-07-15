@@ -1,3 +1,4 @@
+import contextlib
 import torch
 from torch import nn
 import torchvision
@@ -531,18 +532,21 @@ def get_features(images, masks, encoder, variant="Crop-Feat", device="cuda", img
     Returns:
         features: extracted features. shape of [N, C]
     """
+    autocast_ctx = (torch.autocast(device_type="cuda", dtype=torch.float16)
+                     if str(device).startswith("cuda") else contextlib.nullcontext())
     with torch.no_grad():
         preprocessed_imgs = FFA_preprocess(images, img_size).to(device)
         mask_size = img_size // 14
         masks = get_foreground_mask(masks, mask_size).to(device)
-        if variant == "Crop-Feat":
-            emb = encoder.forward_features(preprocessed_imgs)
-        elif variant == "Crop-Img":
-            emb = encoder.forward_features(FFA_preprocess(images, img_size).to(device))
-        else:
-            raise ValueError("Invalid variant, only Crop-Feat and Crop-Img are supported.")
+        with autocast_ctx:
+            if variant == "Crop-Feat":
+                emb = encoder.forward_features(preprocessed_imgs)
+            elif variant == "Crop-Img":
+                emb = encoder.forward_features(FFA_preprocess(images, img_size).to(device))
+            else:
+                raise ValueError("Invalid variant, only Crop-Feat and Crop-Img are supported.")
 
-        grid = emb["x_norm_patchtokens"].view(len(images), mask_size, mask_size, -1)
+        grid = emb["x_norm_patchtokens"].float().view(len(images), mask_size, mask_size, -1)
         avg_feature = (grid * masks.permute(0, 2, 3, 1)).sum(dim=(1, 2)) / masks.sum(dim=(1, 2, 3)).unsqueeze(-1)
 
         return avg_feature
