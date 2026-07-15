@@ -8,7 +8,9 @@ __pycache__/
 **/__pycache__/
 *.py[cod]
 *$py.class
-
+example_dataset
+__pycache__
+utils/__pycache__
 # C extensions
 *.so
 
