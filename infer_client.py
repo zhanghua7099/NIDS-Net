@@ -24,11 +24,9 @@ import requests
 from pycocotools import mask as maskUtils
 
 
-def infer(url, image_path):
-    content_type = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
-    with open(image_path, "rb") as f:
-        files = {"file": (os.path.basename(image_path), f, content_type)}
-        resp = requests.post(f"{url.rstrip('/')}/infer", files=files)
+def infer_bytes(url, data, filename="frame.jpg", content_type="image/jpeg"):
+    files = {"file": (filename, data, content_type)}
+    resp = requests.post(f"{url.rstrip('/')}/infer", files=files)
     if not resp.ok:
         detail = resp.text.strip()
         if detail:
@@ -37,19 +35,25 @@ def infer(url, image_path):
     return resp.json()["detections"]
 
 
-def visualize(image_path, detections):
-    img = cv2.imread(image_path)
-    if img is None:
-        raise FileNotFoundError(f"could not read image: {image_path}")
+def infer(url, image_path):
+    content_type = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
+    with open(image_path, "rb") as f:
+        data = f.read()
+    return infer_bytes(url, data, filename=os.path.basename(image_path), content_type=content_type)
+
+
+_rng = np.random.default_rng(42)
+_colors = {}
+
+
+def color_for(name):
+    if name not in _colors:
+        _colors[name] = tuple(int(c) for c in _rng.integers(40, 255, size=3))
+    return _colors[name]
+
+
+def draw_detections(img, detections):
     overlay = img.copy()
-
-    rng = np.random.default_rng(42)
-    colors = {}
-
-    def color_for(name):
-        if name not in colors:
-            colors[name] = tuple(int(c) for c in rng.integers(40, 255, size=3))
-        return colors[name]
 
     for det in detections:
         if det.get("segmentation") is None:
@@ -68,10 +72,17 @@ def visualize(image_path, detections):
     return img
 
 
+def visualize(image_path, detections):
+    img = cv2.imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"could not read image: {image_path}")
+    return draw_detections(img, detections)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Send an image to infer_server.py and visualize the result.")
     parser.add_argument("image", help="path to the input image")
-    parser.add_argument("--url", default="http://127.0.0.1:8000", help="inference server base URL")
+    parser.add_argument("--url", default="http://172.24.36.34:8000", help="inference server base URL")
     parser.add_argument("--out", default=None, help="output path (default: <image>_pred.jpg)")
     parser.add_argument("--show", action="store_true", help="also open a window to display the result")
     args = parser.parse_args()
