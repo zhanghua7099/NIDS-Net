@@ -14,8 +14,6 @@ from groundingdino.util.utils import clean_state_dict
 # from segment_anything import SamPredictor, SamAutomaticMaskGenerator, sam_model_registry
 from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator, SamPredictor
 
-os.system("python setup.py build develop --user")
-# os.system("pip install packaging==21.3")
 warnings.filterwarnings("ignore")
 
 

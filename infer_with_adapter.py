@@ -82,7 +82,7 @@ encoder.eval()
 # ---------------------------------------------------------------------------
 print("[step 2/3] Loading GroundingDINO + SAM and running detection...")
 gdino = GroundingDINOObjectPredictor(use_vitb=False, threshold=0.15)
-SAM = SegmentAnythingPredictor(vit_model="vit_t")
+SAM = SegmentAnythingPredictor(vit_model="vit_h")
 
 all_results = {}
 for test_path in test_images:

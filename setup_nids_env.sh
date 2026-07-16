@@ -91,6 +91,33 @@ fi
 conda activate "$ENV_NAME"
 
 # ---------------------------------------------------------------------------
+# 1b. Pin numpy<2 for the lifetime of this env, not just this script.
+#     torch/detectron2/pycocotools wheels here are built against the numpy
+#     1.x ABI; numpy 2.x makes torch.from_numpy() blow up at runtime with
+#     "RuntimeError: Numpy is not available". Packages like opencv-python
+#     declare "numpy>=2" and will happily pull in numpy 2.x the moment any
+#     pip install resolves them -- including GroundingDINO/MobileSAM's own
+#     "pip install" call inside setup.py (step 6 below), and any package you
+#     pip install by hand later in this env. A pip constraints file (via
+#     PIP_CONSTRAINT) applies to all of those uniformly, since subprocess
+#     pip calls inherit the shell env. Persisting it into the env's
+#     activate.d hook makes it stick for future terminal sessions too, so
+#     this can't regress by a stray "pip install X" after setup is done.
+# ---------------------------------------------------------------------------
+ENV_DIR="$CONDA_BASE/envs/$ENV_NAME"
+CONSTRAINTS_FILE="$ENV_DIR/numpy-constraint.txt"
+echo "numpy<2" > "$CONSTRAINTS_FILE"
+export PIP_CONSTRAINT="$CONSTRAINTS_FILE"
+
+mkdir -p "$ENV_DIR/etc/conda/activate.d" "$ENV_DIR/etc/conda/deactivate.d"
+cat > "$ENV_DIR/etc/conda/activate.d/pin-numpy.sh" <<EOF
+export PIP_CONSTRAINT="$CONSTRAINTS_FILE"
+EOF
+cat > "$ENV_DIR/etc/conda/deactivate.d/pin-numpy.sh" <<'EOF'
+unset PIP_CONSTRAINT
+EOF
+
+# ---------------------------------------------------------------------------
 # 2. PyTorch 2.2.1 + CUDA 11.8 (install this FIRST so nothing else drags in
 #    a mismatched torch build from pip later)
 # ---------------------------------------------------------------------------
@@ -121,9 +148,9 @@ retry pip install \
   matplotlib onnxruntime onnx scipy hydra-colorlog hydra-core gdown \
   pytorch-lightning pandas ruamel.yaml pyrender wandb distinctipy chardet \
   requests tqdm ftfy regex absl-py
-# opencv-python's newest build declares numpy>=2 but a pinned numpy<2 works
-# fine at runtime; pycocotools' wheel is only ABI-compatible with numpy<2,
-# so numpy<2 wins and must be (re)pinned last, below.
+# opencv-python's newest build declares numpy>=2, but PIP_CONSTRAINT (set in
+# step 1b) forces pip to resolve an opencv-python build compatible with
+# numpy<2 instead, so this never drags numpy 2.x in.
 
 # ---------------------------------------------------------------------------
 # 4. detectron2 (build from source; must NOT use pip's build isolation or
@@ -147,11 +174,6 @@ fi
 log "Installing segment-anything + supervision==0.20.0"
 retry pip install 'git+https://github.com/facebookresearch/segment-anything.git' supervision==0.20.0
 
-# Re-pin numpy<2: torch/detectron2/pycocotools wheels here were built
-# against numpy 1.x and segfault/ImportError under numpy 2.x at runtime.
-log "Pinning numpy<2 (required by pycocotools / detectron2 prebuilt wheels)"
-retry pip install "numpy<2"
-
 # ---------------------------------------------------------------------------
 # 6. RoboKit + GroundingDINO + MobileSAM (setup.py also downloads their
 #    checkpoints into ckpts/gdino and ckpts/mobilesam)
@@ -164,7 +186,6 @@ else
   CC="$GCC_BIN" CXX="$GXX_BIN" TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
     CUDA_HOME="$CUDA_HOME_DIR" python setup.py install
 fi
-retry pip install "numpy<2"   # GroundingDINO/MobileSAM deps can bump numpy again
 
 # Download <url> to <dest> atomically: retry with resume (-C -) into a
 # ".part" file and only mv it into place on full success, so a dropped
@@ -236,6 +257,17 @@ python - <<'PY'
 import torch, torchvision, detectron2, numpy
 from groundingdino.models import build_model
 import mobile_sam
+
+# A numpy 2.x regression here means torch.from_numpy() will raise
+# "RuntimeError: Numpy is not available" at inference time -- fail loudly
+# now instead of discovering it later mid-inference.
+major = int(numpy.__version__.split(".")[0])
+assert major < 2, (
+    f"numpy {numpy.__version__} is installed but torch/detectron2 need numpy<2. "
+    "PIP_CONSTRAINT should have prevented this -- check "
+    "$CONDA_PREFIX/numpy-constraint.txt and re-run: pip install 'numpy<2'"
+)
+
 print("torch       ", torch.__version__, "cuda_available=", torch.cuda.is_available())
 print("torchvision ", torchvision.__version__)
 print("detectron2  ", detectron2.__version__)
