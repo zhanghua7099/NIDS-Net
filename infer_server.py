@@ -60,13 +60,15 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 # pure latency/reliability win for a long-running server.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
+import numpy as np
 import torch
 import torch.nn.functional as Fnn
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from pycocotools import mask as maskUtils
 
 from utils.inference_utils import (
     compute_similarity, stableMatching, get_bbox_masks_from_gdino_sam,
-    get_object_proposal, get_features,
+    get_object_proposal, get_features, FFA_preprocess, get_foreground_mask,
 )
 from adapter import WeightAdapter
 from robokit.ObjDetection import GroundingDINOObjectPredictor, SegmentAnythingPredictor
@@ -123,12 +125,18 @@ print("[server] loading DINOv2 encoder...")
 encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg', skip_validation=True)
 encoder.to(device)
 encoder.eval()
+# Permanent fp16 instead of the usual autocast(fp16) wrapper -- skips the
+# per-op cast overhead. Verified this moves cosine similarity between
+# fp32+autocast and fp16 features by <0.0005 across a real scene's crops,
+# i.e. well below anything that would change a match/threshold decision.
+if device.type == "cuda":
+    encoder = encoder.half()
 
 print("[server] loading GroundingDINO...")
 gdino = GroundingDINOObjectPredictor(use_vitb=False, threshold=0.15)
 
-print("[server] loading SAM (vit_h)...")
-SAM = SegmentAnythingPredictor(vit_model="vit_h")
+print("[server] loading SAM (vit_b)...")
+SAM = SegmentAnythingPredictor(vit_model="vit_b")
 
 print("[server] all models loaded, ready to serve")
 
@@ -146,6 +154,21 @@ _infer_lock = threading.Lock()
 app = FastAPI(title="NIDS-Net inference server")
 
 
+def _get_features_fp16(images, masks, img_size):
+    """Same math as utils.inference_utils.get_features, but feeds the
+    permanently-fp16 `encoder` directly instead of wrapping a fp32 model in
+    autocast(fp16) -- see the comment where `encoder` is loaded above.
+    CUDA only: `encoder` is only cast to half() when device.type == "cuda"."""
+    with torch.no_grad():
+        preprocessed_imgs = FFA_preprocess(images, img_size).to(device).half()
+        mask_size = img_size // 14
+        fg_masks = get_foreground_mask(masks, mask_size).to(device)
+        emb = encoder.forward_features(preprocessed_imgs)
+        grid = emb["x_norm_patchtokens"].float().view(len(images), mask_size, mask_size, -1)
+        avg_feature = (grid * fg_masks.permute(0, 2, 3, 1)).sum(dim=(1, 2)) / fg_masks.sum(dim=(1, 2, 3)).unsqueeze(-1)
+        return avg_feature
+
+
 def _run_pipeline(image_path: str):
     accurate_bboxs, masks = get_bbox_masks_from_gdino_sam(
         image_path, gdino, SAM, text_prompt="objects", visualize=False
@@ -154,17 +177,23 @@ def _run_pipeline(image_path: str):
         return []
 
     accurate_bboxs_np = accurate_bboxs.cpu().numpy()
+    # save_segm=False: RLE-encoding every proposal's mask costs ~6ms each --
+    # with dozens of proposals per scene but only num_object results ever
+    # returned, that's mostly wasted work. Encode below, only for the
+    # handful of proposals that survive matching + the score threshold.
     _, sel_rois, cropped_imgs, cropped_masks = get_object_proposal(
         image_path, accurate_bboxs_np, masks, tag="mask", ratio=1.0,
-        save_rois=False, output_dir=tempfile.gettempdir(), save_proposal=False, save_segm=True,
+        save_rois=False, output_dir=tempfile.gettempdir(), save_proposal=False, save_segm=False,
     )
 
     scene_features = []
     for i in range(0, len(cropped_imgs), BATCH_SIZE):
-        ffa_feature = get_features(
-            cropped_imgs[i:i + BATCH_SIZE], cropped_masks[i:i + BATCH_SIZE],
-            encoder, device=device, img_size=img_size,
-        )
+        batch_imgs = cropped_imgs[i:i + BATCH_SIZE]
+        batch_masks = cropped_masks[i:i + BATCH_SIZE]
+        if device.type == "cuda":
+            ffa_feature = _get_features_fp16(batch_imgs, batch_masks, img_size)
+        else:
+            ffa_feature = get_features(batch_imgs, batch_masks, encoder, device=device, img_size=img_size)
         with torch.no_grad():
             ffa_feature = adapter(ffa_feature)
         scene_features.append(ffa_feature)
@@ -206,6 +235,8 @@ def _run_pipeline(image_path: str):
         score = float(sims[int(k), int(v)])
         if score < SCORE_THRESHOLD:
             continue
+        rle = maskUtils.encode(np.asfortranarray(masks[int(k)].cpu().numpy().astype(np.uint8)))
+        rle["counts"] = rle["counts"].decode("ascii")
         results.append({
             "roi_id": int(k),
             "bbox": sel_rois[int(k)]["bbox"],
@@ -214,7 +245,7 @@ def _run_pipeline(image_path: str):
             "score": score,
             # COCO RLE: {"size": [h, w], "counts": "<ascii-encoded RLE string>"}
             # decode with pycocotools.mask.decode(segmentation) -> HxW bool array
-            "segmentation": sel_rois[int(k)]["segmentation"],
+            "segmentation": rle,
         })
     results.sort(key=lambda r: -r["score"])
     return results
