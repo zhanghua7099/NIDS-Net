@@ -1,16 +1,23 @@
 #!/usr/bin/env python
 # coding: utf-8
 #
-# Train the weight adapter on the example dataset's template features.
+# Train the weight adapter on a dataset's template features. Any dataset with
+# the same layout works -- object folders (any names, any image counts) are
+# discovered from TRAIN_DIR at run time, nothing about them is hardcoded.
 #
-#   example_dataset/train/Objects/<obj>/{images,masks}  --FFA-->  raw template features
-#   raw template features                                --InfoNCE-->  WeightAdapter
+#   <TRAIN_DIR>/<obj>/{images,masks}  --FFA-->  raw template features
+#   raw template features             --InfoNCE-->  WeightAdapter
 #
-# Output (everything the inference script needs, self-contained):
-#   example_dataset/train/adapter/weights.pth        -- adapter state_dict
-#   example_dataset/train/adapter/adapted_features.json -- adapter(raw template features)
-#   example_dataset/train/adapter/raw_features.json  -- raw FFA template features (cache)
-#   example_dataset/train/adapter/meta.json          -- object_names + hyperparams
+# Usage:
+#   conda activate nids
+#   python train_adapter.py                              # trains rs_dataset/train (the defaults below)
+#   TRAIN_DIR=my_dataset/train/Objects ADAPTER_DIR=my_dataset/train/adapter python train_adapter.py
+#
+# Output (everything infer_server.py needs, self-contained, written to ADAPTER_DIR):
+#   weights.pth            -- adapter state_dict
+#   adapted_features.json  -- adapter(raw template features)
+#   raw_features.json      -- raw FFA template features (cache)
+#   meta.json               -- object_names + hyperparams
 
 import glob
 import json
@@ -31,13 +38,19 @@ from adapter import WeightAdapter, InfoNCELoss
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-TRAIN_DIR = "example_dataset/train/Objects"
-ADAPTER_DIR = "example_dataset/train/adapter"
+TRAIN_DIR = os.environ.get("TRAIN_DIR", "rs_dataset/train/Objects")
+ADAPTER_DIR = os.environ.get("ADAPTER_DIR", "rs_dataset/train/adapter")
 IMG_SIZE = 448
 REDUCTION = 4
 TEMPERATURE = 0.05
 LEARNING_RATE = 1e-3
 EPOCHS = 200
+
+if not os.path.isdir(TRAIN_DIR):
+    raise FileNotFoundError(
+        f"training directory not found: {TRAIN_DIR!r}. Set TRAIN_DIR to a directory containing one "
+        "subfolder per object, each with images/ and masks/."
+    )
 
 os.makedirs(ADAPTER_DIR, exist_ok=True)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -80,11 +93,15 @@ encoder.to(device)
 encoder.eval()
 
 object_dataset = InstanceDataset(data_dir=TRAIN_DIR, dataset="Object", transform=None, imsize=IMG_SIZE)
+# Per-object template counts, in the same order as object_names -- object folders
+# aren't required to hold the same number of images, so this must not assume a
+# uniform count (see FeatureDataset's `counts` param below).
+counts_per_object = object_dataset.cfg["length"]
 raw_features_path = os.path.join(ADAPTER_DIR, "raw_features.json")
 raw_object_features = compute_ffa_template_features(raw_features_path, object_dataset, encoder, img_size=IMG_SIZE)
 num_example = len(raw_object_features) // num_object
 print(f"[step 1/2] raw template features: {tuple(raw_object_features.shape)} "
-      f"({num_object} objects x {num_example} views)")
+      f"({num_object} objects x {counts_per_object} views)")
 
 # ---------------------------------------------------------------------------
 # 2. Train the weight adapter (InfoNCE contrastive loss, ~seconds on GPU)
@@ -95,7 +112,7 @@ adapter = WeightAdapter(input_features, reduction=REDUCTION).to(device)
 optimizer = torch.optim.Adam(adapter.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 criterion = InfoNCELoss(temperature=TEMPERATURE).to(device)
 
-feature_dataset = FeatureDataset(data_json=raw_features_path, num_object=num_object)
+feature_dataset = FeatureDataset(data_json=raw_features_path, num_object=num_object, counts=counts_per_object)
 dataloader = DataLoader(feature_dataset, batch_size=len(feature_dataset), shuffle=False)
 
 adapter.train()
@@ -127,6 +144,7 @@ meta = {
     "object_names": object_names,
     "num_object": num_object,
     "num_example": num_example,
+    "num_example_per_object": counts_per_object,
     "img_size": IMG_SIZE,
     "reduction": REDUCTION,
     "temperature": TEMPERATURE,

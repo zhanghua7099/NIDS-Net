@@ -19,6 +19,8 @@
 # Config (all optional, read at startup):
 #   INFER_HOST  -- bind address (default: 0.0.0.0)
 #   INFER_PORT  -- bind port (default: 8000)
+#   INFER_ADAPTER_DIR -- adapter artifact directory (default: rs_dataset/train/adapter)
+#   INFER_SCORE_THRESHOLD -- minimum detection score to return (default: 0.5)
 #
 # Reaching it from other machines on your LAN:
 #   This process only controls its own bind address -- if it's running
@@ -69,8 +71,8 @@ from utils.inference_utils import (
 from adapter import WeightAdapter
 from robokit.ObjDetection import GroundingDINOObjectPredictor, SegmentAnythingPredictor
 
-ADAPTER_DIR = "example_dataset/train/adapter"
-SCORE_THRESHOLD = 0.5
+ADAPTER_DIR = os.environ.get("INFER_ADAPTER_DIR", "rs_dataset/train/adapter")
+SCORE_THRESHOLD = float(os.environ.get("INFER_SCORE_THRESHOLD", "0.5"))
 BATCH_SIZE = 32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -79,15 +81,37 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Load everything once, at import time (i.e. once per server process, not
 # once per request).
 # ---------------------------------------------------------------------------
+if not os.path.isdir(ADAPTER_DIR):
+    raise FileNotFoundError(
+        f"adapter directory not found: {ADAPTER_DIR!r}. Set INFER_ADAPTER_DIR to the directory containing "
+        "meta.json, weights.pth, and adapted_features.json for your dataset."
+    )
+
 with open(os.path.join(ADAPTER_DIR, "meta.json")) as f:
     meta = json.load(f)
 object_names = meta["object_names"]
 num_object = meta["num_object"]
-num_example = meta["num_example"]
 img_size = meta["img_size"]
+
+# Per-object template counts (adapted_object_features is laid out as one
+# contiguous block of templates per object, in object_names order). Older
+# adapters trained before this field existed had a uniform count per object --
+# fall back to that so they still load.
+num_example_per_object = meta.get("num_example_per_object", [meta["num_example"]] * num_object)
+assert len(num_example_per_object) == num_object
 
 with open(os.path.join(ADAPTER_DIR, "adapted_features.json")) as f:
     adapted_object_features = torch.Tensor(json.load(f)["features"]).to(device)
+
+assert sum(num_example_per_object) == adapted_object_features.shape[0], (
+    f"meta.json's num_example_per_object sums to {sum(num_example_per_object)} but "
+    f"adapted_features.json has {adapted_object_features.shape[0]} rows -- retrain the adapter"
+)
+# (start, end) row bounds of each object's contiguous template block within
+# adapted_object_features, used to take a per-object max similarity below
+# without assuming every object has the same number of templates.
+_bounds = list(itertools.accumulate(num_example_per_object, initial=0))
+template_blocks = list(zip(_bounds[:-1], _bounds[1:]))
 
 adapter = WeightAdapter(adapted_object_features.shape[1], reduction=meta["reduction"]).to(device)
 adapter.load_state_dict(torch.load(os.path.join(ADAPTER_DIR, "weights.pth"), map_location=device))
@@ -147,9 +171,15 @@ def _run_pipeline(image_path: str):
     scene_features = torch.cat(scene_features, dim=0)
     scene_features = Fnn.normalize(scene_features, dim=1, p=2)
 
+    # [num_proposals, total_templates] -- template columns are grouped by
+    # object (see template_blocks), but blocks aren't all the same width, so
+    # this can't be reshaped into a rectangular [num_proposals, num_object,
+    # num_example] tensor; take each object's max over its own column range.
     sim_mat = compute_similarity(adapted_object_features, scene_features)
-    sim_mat = sim_mat.view(len(scene_features), num_object, num_example)
-    sims, _ = torch.max(sim_mat, dim=2)
+    sims = torch.stack(
+        [sim_mat[:, start:end].max(dim=1).values for start, end in template_blocks],
+        dim=1,
+    )
 
     num_proposals = len(sel_rois)
     sel_obj_ids = [str(v) for v in range(num_object)]

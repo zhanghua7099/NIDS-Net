@@ -12,7 +12,7 @@ from utils.instance_det_dataset import InstanceDataset
 
 
 class FeatureDataset(Dataset):
-    def __init__(self, data_json, num_object, label_offset=0):
+    def __init__(self, data_json, num_object, counts=None, label_offset=0):
         if os.path.exists(data_json):
             if data_json.endswith('.json'):
                 with open(data_json, 'r') as f:
@@ -23,8 +23,20 @@ class FeatureDataset(Dataset):
                 emb_dim = features.size(-1)
                 self.data = features.view(-1, emb_dim).float().cuda()
                 print("Shape of descriptor tensor: ", self.data.size())
-        self.num_template_per_object = self.data.size(0) // num_object
-        print(f'num_template_per_object: {self.num_template_per_object}')
+        # counts: per-object template counts, in object order. Required whenever
+        # objects don't all have the same number of template images -- with a
+        # single num_template_per_object, index // num_template_per_object
+        # mislabels every sample past the first object whose count differs.
+        if counts is None:
+            self.num_template_per_object = self.data.size(0) // num_object
+            print(f'num_template_per_object: {self.num_template_per_object}')
+            counts = [self.num_template_per_object] * num_object
+        else:
+            assert sum(counts) == self.data.size(0), (
+                f"sum(counts)={sum(counts)} != number of feature rows={self.data.size(0)}"
+            )
+            print(f'num_template_per_object (per object): {counts}')
+        self.labels = [obj_id + label_offset for obj_id, c in enumerate(counts) for _ in range(c)]
         self.label_offset = label_offset
 
     def __len__(self):
@@ -32,7 +44,7 @@ class FeatureDataset(Dataset):
 
     def __getitem__(self, index):
         img_feature = self.data[index]
-        label = index // self.num_template_per_object + self.label_offset  # 100 objects in total
+        label = self.labels[index]
 
         return img_feature, label
 

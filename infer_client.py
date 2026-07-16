@@ -29,6 +29,10 @@ def infer(url, image_path):
     with open(image_path, "rb") as f:
         files = {"file": (os.path.basename(image_path), f, content_type)}
         resp = requests.post(f"{url.rstrip('/')}/infer", files=files)
+    if not resp.ok:
+        detail = resp.text.strip()
+        if detail:
+            raise requests.HTTPError(f"{resp.status_code} {resp.reason}: {detail}", response=resp)
     resp.raise_for_status()
     return resp.json()["detections"]
 
